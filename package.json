@@ -6,7 +6,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "gen-pack": "node tools/gen-default-pack.ts",
+    "gen-pack": "node tools/fetch-vanilla-pack.ts",
     "check": "tsc --noEmit && vitest run --passWithNoTests && vite build"
   },
   "devDependencies": {
