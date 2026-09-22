@@ -22,6 +22,11 @@ export interface BlockTextures {
    * Must fold in layer, tint, and any render-flag that affects appearance.
    */
   faceKey(blockName: string, face: Face): number
+  /**
+   * Resolve an explicit vanilla texture name (what shapes.ts names its faces
+   * with). Falls back to `blockName`'s flat colour when the pack lacks it.
+   */
+  ref(textureName: string, blockName: string): { layer: number; tint: number; key: number }
 }
 
 // --- trust boundary: a dropped file is arbitrary input ----------------------
@@ -108,15 +113,32 @@ const COMPOSITES: { base: string; overlay: string; tint: number }[] = [
 
 const layerKeyOf = (ref: Ref): string => (ref.overlay ? `${ref.name}|${ref.overlay}` : ref.name)
 
-/** Texture stem for a block, before any per-face suffix. */
-function stemOf(base: string): string {
+/** Blocks made *of* another block: they borrow that block's textures. */
+const MATERIAL_SUFFIX = [
+  '_slab',
+  '_stairs',
+  '_wall',
+  '_fence_gate',
+  '_fence',
+  '_button',
+  '_pressure_plate',
+]
+
+/** Texture stems for a block, most specific first, before any per-face suffix. */
+function stemsOf(base: string): string[] {
   // Wood/hyphae reuse the log/stem texture on every face.
-  if (base.endsWith('_wood')) return `${base.slice(0, -5)}_log`
-  if (base.endsWith('_hyphae')) return `${base.slice(0, -7)}_stem`
-  if (base === 'water') return 'water_still'
-  if (base === 'lava') return 'lava_still'
-  if (base === 'grass') return 'short_grass'
-  return base
+  if (base.endsWith('_wood')) return [`${base.slice(0, -5)}_log`]
+  if (base.endsWith('_hyphae')) return [`${base.slice(0, -7)}_stem`]
+  if (base === 'water') return ['water_still']
+  if (base === 'lava') return ['lava_still']
+  if (base === 'grass') return ['short_grass']
+  for (const suffix of MATERIAL_SUFFIX) {
+    if (!base.endsWith(suffix)) continue
+    // stone_brick_slab -> stone_bricks, spruce_slab -> spruce_planks.
+    const stem = base.slice(0, -suffix.length)
+    return [base, stem, `${stem}s`, `${stem}_planks`]
+  }
+  return [base]
 }
 
 function tintOf(base: string): number {
@@ -124,6 +146,14 @@ function tintOf(base: string): number {
   if (base.endsWith('_leaves') && !UNTINTED_LEAVES.has(base)) return FOLIAGE_TINT
   if (GRASS_TINTED.has(base)) return GRASS_TINT
   return UNTINTED
+}
+
+/** Tint for an explicit texture name: `large_fern_top` takes the grass tint. */
+function tintOfTexture(name: string): number {
+  const direct = tintOf(name)
+  if (direct !== UNTINTED) return direct
+  const stripped = name.replace(/_(top|bottom|side|stage\d+)$/, '')
+  return stripped === name ? UNTINTED : tintOf(stripped)
 }
 
 /**
@@ -135,14 +165,14 @@ function resolveFace(base: string, slot: Slot, has: (name: string) => boolean): 
   const special = SPECIAL[base]?.[slot]
   if (special) return has(special.name) ? special : null
 
-  const stem = stemOf(base)
   const tint = tintOf(base)
-  const candidates =
+  const candidates = stemsOf(base).flatMap((stem) =>
     slot === 'top'
       ? [`${stem}_top`, stem]
       : slot === 'bottom'
         ? [`${stem}_bottom`, `${stem}_top`, stem]
-        : [`${stem}_side`, stem]
+        : [`${stem}_side`, stem],
+  )
   // Old packs named a few things differently; `grass` is the common one.
   if (base === 'grass' || base === 'short_grass') candidates.push('grass', 'short_grass')
   for (const name of candidates) if (has(name)) return { name, tint }
@@ -170,6 +200,16 @@ function makeTextures(tileSize: number, rgba: Uint8Array, layerKeys: string[]): 
   const faceKeys = new Map<string, number>()
   const FACES: Face[] = ['px', 'nx', 'py', 'ny', 'pz', 'nz']
 
+  const keyOf = (layer: number, tint: number): number => {
+    const id = `${layer}:${tint}`
+    let key = faceKeys.get(id)
+    if (key === undefined) {
+      key = faceKeys.size
+      faceKeys.set(id, key)
+    }
+    return key
+  }
+
   function entry(blockName: string) {
     let hit = resolved.get(blockName)
     if (hit) return hit
@@ -180,12 +220,7 @@ function makeTextures(tileSize: number, rgba: Uint8Array, layerKeys: string[]): 
       const ref = resolveFace(base, SIDE_OF[face], has)
       const layer = ref ? (index.get(layerKeyOf(ref)) ?? WHITE_LAYER) : WHITE_LAYER
       const tint = ref ? ref.tint : fallbackTint
-      const id = `${layer}:${tint}`
-      let key = faceKeys.get(id)
-      if (key === undefined) {
-        key = faceKeys.size
-        faceKeys.set(id, key)
-      }
+      const key = keyOf(layer, tint)
       hit.layers.push(layer)
       hit.tints.push(tint)
       hit.keys.push(key)
@@ -196,12 +231,27 @@ function makeTextures(tileSize: number, rgba: Uint8Array, layerKeys: string[]): 
 
   const slot = (face: Face): number => FACES.indexOf(face)
 
+  const refs = new Map<string, { layer: number; tint: number; key: number }>()
+
   return {
     texture,
     tileSize,
     layer: (blockName, face) => entry(blockName).layers[slot(face)],
     tint: (blockName, face) => entry(blockName).tints[slot(face)],
     faceKey: (blockName, face) => entry(blockName).keys[slot(face)],
+    ref(textureName, blockName) {
+      const id = `${textureName}|${blockName}`
+      let hit = refs.get(id)
+      if (hit) return hit
+      const layer = index.get(textureName)
+      hit =
+        layer === undefined
+          ? { layer: WHITE_LAYER, tint: blockColour(blockName), key: 0 }
+          : { layer, tint: tintOfTexture(textureName), key: 0 }
+      hit.key = keyOf(hit.layer, hit.tint)
+      refs.set(id, hit)
+      return hit
+    },
   }
 }
 
