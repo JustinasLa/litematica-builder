@@ -144,8 +144,9 @@ describe('shapeFor: geometry invariants per family', () => {
     assertValidShape(shapeFor('red_carpet', {}))
   })
 
-  it('snow: layers 1..8', () => {
-    for (let n = 1; n <= 8; n++) assertValidShape(shapeFor('snow', { layers: String(n) }))
+  it('snow: layers 1..7 are shaped; layer 8 is a full cube (null)', () => {
+    for (let n = 1; n <= 7; n++) assertValidShape(shapeFor('snow', { layers: String(n) }))
+    expect(shapeFor('snow', { layers: '8' })).toBeNull()
   })
 
   it('farmland and dirt_path', () => {
@@ -279,14 +280,15 @@ describe('shapeFor: orientation', () => {
     expect(top.boxes).toEqual([{ from: [0, 13, 0], to: [16, 16, 16] }])
   })
 
-  it('trapdoor: open=true is a 3-thick vertical panel on the side opposite facing', () => {
-    // facing=east -> opposite is west -> panel on the -x side, x 0..3.
+  it('trapdoor: open=true is a 3-thick vertical panel on the facing side', () => {
+    // facing=east -> panel on the +x side, x 13..16 (vanilla stores the
+    // clicked face, and the panel stands up against that side).
     const east = shapeFor('oak_trapdoor', { facing: 'east', half: 'bottom', open: 'true' })!
-    expect(east.boxes).toEqual([{ from: [0, 0, 0], to: [3, 16, 16] }])
+    expect(east.boxes).toEqual([{ from: [13, 0, 0], to: [16, 16, 16] }])
 
-    // facing=west -> opposite is east -> panel on the +x side, x 13..16.
+    // facing=west -> panel on the -x side, x 0..3.
     const west = shapeFor('oak_trapdoor', { facing: 'west', half: 'bottom', open: 'true' })!
-    expect(west.boxes).toEqual([{ from: [13, 0, 0], to: [16, 16, 16] }])
+    expect(west.boxes).toEqual([{ from: [0, 0, 0], to: [3, 16, 16] }])
   })
 
   it('fence: centre post is always x,z in 6..10; arms appear only for true sides and reach that edge', () => {
@@ -336,15 +338,16 @@ describe('shapeFor: orientation', () => {
     expect(tall.boxes).toContainEqual({ from: [5, 0, 0], to: [11, 16, 8] })
   })
 
-  it('snow: height is 2*layers, and layers=8 fully fills the block', () => {
-    for (let n = 1; n <= 8; n++) {
+  it('snow: height is 2*layers for layers 1..7', () => {
+    for (let n = 1; n <= 7; n++) {
       const shape = shapeFor('snow', { layers: String(n) })!
       expect(shape.boxes).toEqual([{ from: [0, 0, 0], to: [16, 2 * n, 16] }])
     }
-    // Observation for the report, not an assumption baked into the assertion
-    // above: even at layers=8 (visually a full cube) shapeFor still returns a
-    // shape rather than null, so isOpaque reports it as non-opaque.
-    expect(isOpaque('minecraft:snow', { layers: '8' })).toBe(false)
+  })
+
+  it('snow: layers=8 is a full cube, so isOpaque reports true', () => {
+    expect(shapeFor('snow', { layers: '8' })).toBeNull()
+    expect(isOpaque('minecraft:snow', { layers: '8' })).toBe(true)
   })
 
   it('farmland and dirt_path top out at y=15', () => {
@@ -355,6 +358,163 @@ describe('shapeFor: orientation', () => {
   it('two-tall plants: half=upper references the _top texture, half=lower the _bottom', () => {
     expect(shapeFor('tall_grass', { half: 'upper' })!.cross).toEqual(['tall_grass_top'])
     expect(shapeFor('tall_grass', { half: 'lower' })!.cross).toEqual(['tall_grass_bottom'])
+  })
+
+  it('door: closed panel sits on the side opposite facing', () => {
+    // facing=east -> opposite is west -> panel at x 0..3.
+    const east = shapeFor('oak_door', { facing: 'east', half: 'lower' })!
+    expect(east.boxes).toEqual([{ from: [0, 0, 0], to: [3, 16, 16], tex: 'oak_door_bottom' }])
+
+    // facing=north -> opposite is south -> panel at z 13..16.
+    const north = shapeFor('oak_door', { facing: 'north', half: 'lower' })!
+    expect(north.boxes).toEqual([{ from: [0, 0, 13], to: [16, 16, 16], tex: 'oak_door_bottom' }])
+  })
+
+  it('door: half selects the _top / _bottom texture', () => {
+    expect(shapeFor('oak_door', { facing: 'east', half: 'upper' })!.boxes[0]!.tex).toBe('oak_door_top')
+    expect(shapeFor('oak_door', { facing: 'east', half: 'lower' })!.boxes[0]!.tex).toBe('oak_door_bottom')
+  })
+
+  it('door: open panel swings to the hinge edge, facing=east', () => {
+    const left = shapeFor('oak_door', { facing: 'east', half: 'lower', open: 'true', hinge: 'left' })!
+    expect(left.boxes).toEqual([{ from: [0, 0, 0], to: [16, 16, 3], tex: 'oak_door_bottom' }])
+
+    const right = shapeFor('oak_door', { facing: 'east', half: 'lower', open: 'true', hinge: 'right' })!
+    expect(right.boxes).toEqual([{ from: [0, 0, 13], to: [16, 16, 16], tex: 'oak_door_bottom' }])
+  })
+})
+
+// --- 2b. new shape families (torch, ladder, button, pressure plate, lantern,
+// chain, signs, barrier, unattached glow_lichen) --------------------------
+
+describe('shapeFor: torch, ladder, button, pressure plate, lantern, chain, signs', () => {
+  it('torch / soul_torch / redstone_torch: a post at x,z 7..9, y 0..10', () => {
+    for (const name of ['torch', 'soul_torch', 'redstone_torch']) {
+      const shape = shapeFor(name, {})!
+      assertValidShape(shape)
+      expect(shape.boxes).toEqual([{ from: [7, 0, 7], to: [9, 10, 9], tex: name }])
+    }
+  })
+
+  it('wall_torch: sits against the wall opposite facing, textured as the plain torch', () => {
+    const east = shapeFor('wall_torch', { facing: 'east' })!
+    expect(east.boxes).toHaveLength(1)
+    expect(east.boxes[0]!.tex).toBe('torch')
+    expect(east.boxes[0]!.from[0]).toBeGreaterThanOrEqual(0)
+    expect(east.boxes[0]!.to[0]).toBeLessThanOrEqual(3)
+
+    const south = shapeFor('wall_torch', { facing: 'south' })!
+    expect(south.boxes[0]!.from[2]).toBeGreaterThanOrEqual(0)
+    expect(south.boxes[0]!.to[2]).toBeLessThanOrEqual(3)
+
+    const west = shapeFor('wall_torch', { facing: 'west' })!
+    expect(west.boxes[0]!.from[0]).toBeGreaterThanOrEqual(13)
+    expect(west.boxes[0]!.to[0]).toBeLessThanOrEqual(16)
+  })
+
+  it('ladder: a thin panel against the wall opposite facing', () => {
+    const east = shapeFor('ladder', { facing: 'east' })!
+    expect(east.boxes[0]!.from[0]).toBeGreaterThanOrEqual(0)
+    expect(east.boxes[0]!.to[0]).toBeLessThanOrEqual(1)
+
+    const west = shapeFor('ladder', { facing: 'west' })!
+    expect(west.boxes[0]!.from[0]).toBeGreaterThanOrEqual(15)
+    expect(west.boxes[0]!.to[0]).toBeLessThanOrEqual(16)
+  })
+
+  it('button: floor and ceiling heights, and a 6x4 in-plane footprint', () => {
+    const floor = shapeFor('stone_button', { face: 'floor' })!
+    expect(floor.boxes).toEqual([{ from: [6, 0, 5], to: [10, 2, 11] }])
+    expect(Math.abs(floor.boxes[0]!.to[0] - floor.boxes[0]!.from[0])).toBe(4)
+    expect(Math.abs(floor.boxes[0]!.to[2] - floor.boxes[0]!.from[2])).toBe(6)
+
+    const ceiling = shapeFor('stone_button', { face: 'ceiling' })!
+    expect(ceiling.boxes).toEqual([{ from: [6, 14, 5], to: [10, 16, 11] }])
+  })
+
+  it('button: face=wall sits against the wall opposite facing', () => {
+    const east = shapeFor('stone_button', { face: 'wall', facing: 'east' })!
+    expect(east.boxes[0]!.from[0]).toBeGreaterThanOrEqual(0)
+    expect(east.boxes[0]!.to[0]).toBeLessThanOrEqual(2)
+  })
+
+  it('pressure_plate: exact footprint [1,0,1] to [15,1,15]', () => {
+    expect(shapeFor('stone_pressure_plate', {})!.boxes).toEqual([{ from: [1, 0, 1], to: [15, 1, 15] }])
+  })
+
+  it('lantern / soul_lantern: box centred in x/z, y 0..7 grounded and y 2..9 hanging', () => {
+    for (const name of ['lantern', 'soul_lantern']) {
+      const grounded = shapeFor(name, { hanging: 'false' })!
+      expect(grounded.boxes).toEqual([{ from: [5, 0, 5], to: [11, 7, 11], tex: name }])
+      const hanging = shapeFor(name, { hanging: 'true' })!
+      expect(hanging.boxes).toEqual([{ from: [5, 2, 5], to: [11, 9, 11], tex: name }])
+    }
+  })
+
+  it('sea_lantern and jack_o_lantern are full cubes (null)', () => {
+    expect(shapeFor('sea_lantern', {})).toBeNull()
+    expect(shapeFor('jack_o_lantern', {})).toBeNull()
+  })
+
+  it('chain: a 2x16x2 post running along its axis', () => {
+    const y = shapeFor('chain', { axis: 'y' })!
+    expect(y.boxes).toEqual([{ from: [7, 0, 7], to: [9, 16, 9], tex: 'chain' }])
+    const x = shapeFor('chain', { axis: 'x' })!
+    expect(x.boxes).toEqual([{ from: [0, 7, 7], to: [16, 9, 9], tex: 'chain' }])
+    const z = shapeFor('chain', { axis: 'z' })!
+    expect(z.boxes).toEqual([{ from: [7, 7, 0], to: [9, 9, 16], tex: 'chain' }])
+  })
+
+  it('signs: standing sign is a panel on a post, textured with the parent planks', () => {
+    const sign = shapeFor('spruce_sign', { facing: 'east' })!
+    for (const b of sign.boxes) expect(b.tex).toBe('spruce_planks')
+    expect(sign.boxes.length).toBeGreaterThanOrEqual(2)
+    // The post sits centred in x/z and starts at the block's own floor.
+    expect(sign.boxes.some((b) => b.from[1] === 0)).toBe(true)
+  })
+
+  it('signs: wall sign is a panel against the wall opposite facing', () => {
+    const sign = shapeFor('spruce_wall_sign', { facing: 'east' })!
+    expect(sign.boxes).toHaveLength(1)
+    expect(sign.boxes[0]!.tex).toBe('spruce_planks')
+    expect(sign.boxes[0]!.from[0]).toBeGreaterThanOrEqual(0)
+    expect(sign.boxes[0]!.to[0]).toBeLessThanOrEqual(2)
+  })
+
+  it('signs: hanging sign has a panel near the top, textured with the parent planks', () => {
+    const sign = shapeFor('spruce_hanging_sign', { facing: 'east' })!
+    for (const b of sign.boxes) expect(b.tex).toBe('spruce_planks')
+    expect(sign.boxes.some((b) => b.to[1] >= 14)).toBe(true)
+  })
+
+  it('barrier and unattached glow_lichen: a present-but-invisible shape with zero boxes', () => {
+    expect(shapeFor('barrier', {})).toEqual({ boxes: [] })
+    expect(shapeFor('glow_lichen', {})).toEqual({ boxes: [] })
+    expect(isOpaque('minecraft:barrier', {})).toBe(false)
+    expect(isOpaque('minecraft:glow_lichen', {})).toBe(false)
+  })
+
+  it('every box from these families is inside [0,16] on every axis', () => {
+    const shapes = [
+      shapeFor('torch', {}),
+      shapeFor('wall_torch', { facing: 'east' }),
+      shapeFor('ladder', { facing: 'east' }),
+      shapeFor('stone_button', { face: 'wall', facing: 'east' }),
+      shapeFor('stone_pressure_plate', {}),
+      shapeFor('lantern', { hanging: 'true' }),
+      shapeFor('chain', { axis: 'x' }),
+      shapeFor('spruce_sign', { facing: 'east' }),
+      shapeFor('spruce_wall_sign', { facing: 'east' }),
+      shapeFor('spruce_hanging_sign', { facing: 'east' }),
+    ]
+    for (const s of shapes) assertValidShape(s)
+  })
+
+  it('is deterministic across repeated calls', () => {
+    const props = { facing: 'east', hanging: 'true' }
+    expect(shapeFor('lantern', props)).toEqual(shapeFor('lantern', props))
+    expect(shapeFor('chain', { axis: 'x' })).toEqual(shapeFor('chain', { axis: 'x' }))
+    expect(shapeFor('spruce_sign', { facing: 'east' })).toEqual(shapeFor('spruce_sign', { facing: 'east' }))
   })
 })
 
