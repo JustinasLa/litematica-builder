@@ -33,6 +33,22 @@ const CORNERS = [
 ] as const
 
 /**
+ * Per-face texture basis for the greedy sweep, in the same convention as
+ * faceUv(): u runs right and v runs *down* from the top of the image, because
+ * the DataArrayTexture has flipY=false (t=0 is the PNG's top row).
+ * [swap, uFlip, vFlip] -- swap means the texture's u runs along the sweep's
+ * v axis and vice versa. Flipped ranges tile correctly under RepeatWrapping.
+ */
+const FACE_UV: readonly (readonly [boolean, boolean, boolean])[] = [
+  [true, true, true], // px: u = -z, v = -y
+  [true, false, true], // nx: u = +z, v = -y
+  [true, false, false], // py: u = +x, v = +z  (the image's north edge at -z)
+  [true, false, true], // ny: u = +x, v = -z
+  [false, false, true], // pz: u = +x, v = -y
+  [false, true, true], // nz: u = -x, v = -y
+]
+
+/**
  * Face -> face whose texture it takes, for a pillar's `axis` property. Without
  * this an axis=x log shows its bark on the ends and its rings on the sides.
  */
@@ -200,7 +216,9 @@ function bakeShape(
   const out: ShapeQuad[] = []
   for (const b of shape.boxes) bakeBox(b, blockName, textures, out)
   for (const tex of shape.cross ?? []) bakeCross(tex, blockName, textures, out)
-  return out.length > 0 ? out : null
+  // Possibly empty: a block that is present but draws nothing (barrier, an
+  // unattached glow_lichen) must still be skipped by the cube sweep.
+  return out
 }
 
 function tablesFor(region: Region, textures: BlockTextures): Tables {
@@ -249,6 +267,10 @@ export function* meshSchematic(
   textures: BlockTextures,
   chunkSize = CHUNK,
 ): Generator<ChunkMesh> {
+  // Positions are chunk-local in 1/SUB units and live in a Uint16 attribute.
+  if (!(chunkSize > 0) || chunkSize * SUB > 0xffff) {
+    throw new RangeError(`chunkSize must be 1..${Math.floor(0xffff / SUB)} (got ${chunkSize}).`)
+  }
   for (const region of schematic.regions) {
     yield* meshRegion(region, textures, chunkSize)
   }
@@ -307,6 +329,7 @@ function* meshRegion(
             const face = axis * 2 + d
             const keyBase = face * n
             const tintBase = face * n * 3
+            const [swapUv, uFlip, vFlip] = FACE_UV[face]!
 
             for (let w = lo[axis]!; w < hi[axis]!; w++) {
               has.fill(0, 0, nu * nv)
@@ -368,7 +391,11 @@ function* meshRegion(
                     p[v] = c0[v]! + sv * qh
                     positions.push(p[0]! * SUB, p[1]! * SUB, p[2]! * SUB)
                     normals.push(axis === 0 ? dir : 0, axis === 1 ? dir : 0, axis === 2 ? dir : 0)
-                    tileUv.push(su * qw * TILE, sv * qh * TILE)
+                    const tu = swapUv ? sv * qh : su * qw
+                    const tv = swapUv ? su * qw : sv * qh
+                    const tw = swapUv ? qh : qw
+                    const th = swapUv ? qw : qh
+                    tileUv.push((uFlip ? tw - tu : tu) * TILE, (vFlip ? th - tv : tv) * TILE)
                     layers.push(t.layer[keyBase + idx]!)
                     const c = tintBase + idx * 3
                     colors.push(t.tint[c]!, t.tint[c + 1]!, t.tint[c + 2]!)
@@ -526,8 +553,6 @@ export class Viewer {
   private material: THREE.MeshLambertMaterial | null = null
   private schematic: Schematic | null = null
   private textures: BlockTextures | null = null
-  /** Only a texture set we made ourselves is ours to dispose. */
-  private ownsTextures = false
   /** Bumped on every show()/clear(); an in-flight meshing loop stops when it changes. */
   private generation = 0
   // Reused every frame; nothing is allocated in the render loop.
@@ -593,13 +618,13 @@ export class Viewer {
    * the build appears progressively.
    */
   async show(schematic: Schematic): Promise<number> {
+    // A re-mesh of the same schematic (a pack arriving late) must not throw
+    // the user's camera away.
+    const isNew = schematic !== this.schematic
     this.clear()
     this.schematic = schematic
-    if (!this.textures) {
-      this.textures = fallbackTextures()
-      this.ownsTextures = true
-    }
-    this.frame(schematic)
+    this.textures ??= fallbackTextures()
+    if (isNew) this.frame(schematic)
 
     const generation = this.generation
     const material = materialFor(this.textures)
@@ -625,9 +650,10 @@ export class Viewer {
 
   /** Re-mesh what is on screen with a new texture set (a pack can arrive late). */
   async setTextures(textures: BlockTextures): Promise<number> {
-    if (this.ownsTextures) this.textures?.texture.dispose()
+    // The viewer is the sole consumer of whatever it is handed, so the outgoing
+    // atlas is always ours to free -- up to 96 MB of VRAM per pack otherwise.
+    if (this.textures && this.textures !== textures) this.textures.texture.dispose()
     this.textures = textures
-    this.ownsTextures = false
     const schematic = this.schematic
     return schematic ? this.show(schematic) : 0
   }

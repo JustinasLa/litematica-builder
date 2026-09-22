@@ -130,6 +130,12 @@ const CROSS_PLANTS = new Set([
   'cactus_flower',
 ])
 
+/** Waxed copper blocks share the unwaxed block's textures. */
+const unwaxed = (name: string): string => name.replace(/^waxed_/, '')
+
+/** Names ending in `lantern` that are full cubes, not the lantern block. */
+const SOLID_LANTERNS = new Set(['jack_o_lantern', 'sea_lantern'])
+
 /** Two-block-tall plants: `half` picks the _top / _bottom texture. */
 const TALL_PLANTS = new Set(['tall_grass', 'large_fern', 'rose_bush', 'peony', 'lilac', 'sunflower'])
 
@@ -184,9 +190,9 @@ export function shapeFor(base: string, props: Props): Shape | null {
   }
 
   if (base.endsWith('_trapdoor')) {
-    // Open: the panel stands on the side opposite `facing` (it is hinged on the
-    // block it is attached to), the same for either half.
-    if (props['open'] === 'true') return oriented([box([0, 0, 0], [3, 16, 16])], props, false)
+    // Open: the panel stands upright on the `facing` side, the same for either
+    // half (vanilla places the trapdoor with `facing` away from the player).
+    if (props['open'] === 'true') return oriented([box([13, 0, 0], [16, 16, 16])], props, false)
     return oriented([box([0, 0, 0], [16, 3, 16])], props)
   }
 
@@ -226,10 +232,95 @@ export function shapeFor(base: string, props: Props): Shape | null {
 
   if (base.endsWith('_shelf')) return oriented([box([0, 0, 0], [6, 16, 16])], props, false)
 
+  // --- attached / thin blocks ------------------------------------------------
+  // Authored for facing=east like everything above, then turned by `oriented`.
+  // `facing` is the direction the block looks *away* from whatever holds it, so
+  // a wall-mounted piece sits on the side opposite `facing`.
+
+  if (base.endsWith('_door')) {
+    const tex = `${unwaxed(base)}_${props['half'] === 'upper' ? 'top' : 'bottom'}`
+    // `facing` is the placing player's look direction, so a closed door sits on
+    // the side *opposite* it (nearest the player). Open: the same panel swung a
+    // quarter turn about its hinge edge (left = left of the facing direction).
+    const panel: Box =
+      props['open'] === 'true'
+        ? props['hinge'] === 'right'
+          ? { from: [0, 0, 13], to: [16, 16, 16], tex }
+          : { from: [0, 0, 0], to: [16, 16, 3], tex }
+        : { from: [0, 0, 0], to: [3, 16, 16], tex }
+    return oriented([panel], props, false)
+  }
+
+  if (base.endsWith('_sign')) {
+    // Vanilla has no block texture for signs (they are block entities with
+    // their own atlas); the parent planks is the honest stand-in.
+    const tex = `${base.replace(/_(wall_)?(hanging_)?sign$/, '')}_planks`
+    if (base.endsWith('_wall_sign')) {
+      return oriented([{ from: [0, 4, 0], to: [2, 12, 16], tex }], props, false)
+    }
+    const boxes: Box[] = base.endsWith('_hanging_sign')
+      ? [
+          { from: [1, 2, 7], to: [15, 12, 9], tex },
+          { from: [0, 14, 7], to: [16, 16, 9], tex },
+        ]
+      : [
+          { from: [7, 0, 7], to: [9, 9, 9], tex },
+          { from: [0, 9, 7], to: [16, 16, 9], tex },
+        ]
+    // A free-standing sign turns in 16 steps; round to the nearest quarter.
+    const rotation = Number(props['rotation'])
+    const turns = Number.isFinite(rotation) ? Math.round(rotation / 4) % 4 : turnsOf(props)
+    return { boxes: boxes.map((b) => turnBox(b, turns)) }
+  }
+
+  if (base.endsWith('torch')) {
+    const tex = unwaxed(base).replace('wall_torch', 'torch')
+    // ponytail: a wall torch is the same post pushed against its wall, not the
+    // tilted vanilla model; model the tilt if it ever reads wrong.
+    const post: Box = base.includes('wall_torch')
+      ? { from: [1, 3, 7], to: [3, 13, 9], tex }
+      : { from: [7, 0, 7], to: [9, 10, 9], tex }
+    return oriented([post], props, false)
+  }
+
+  if (base.endsWith('chain') && base !== 'chain_command_block') {
+    const from: [number, number, number] = [7, 7, 7]
+    const to: [number, number, number] = [9, 9, 9]
+    const axis = props['axis'] === 'x' ? 0 : props['axis'] === 'z' ? 2 : 1
+    from[axis] = 0
+    to[axis] = 16
+    return { boxes: [{ from, to, tex: unwaxed(base) }] }
+  }
+
+  if (base.endsWith('lantern') && !SOLID_LANTERNS.has(base)) {
+    const y = props['hanging'] === 'true' ? 2 : 0
+    return { boxes: [{ from: [5, y, 5], to: [11, y + 7, 11], tex: unwaxed(base) }] }
+  }
+
+  // Buttons and pressure plates take their parent material's texture, which
+  // stemsOf() in textures.ts already resolves from the block name.
+  if (base.endsWith('_button')) {
+    const wall = (props['face'] ?? 'wall') === 'wall'
+    return oriented(
+      [wall ? box([0, 6, 5], [2, 12, 11]) : box([5, 0, 6], [11, 2, 10])],
+      props,
+      props['face'] === 'ceiling',
+    )
+  }
+
+  if (base.endsWith('_pressure_plate')) return { boxes: [box([1, 0, 1], [15, 1, 15])] }
+
+  if (base === 'ladder') {
+    // Flat, so bakeBox emits both of its faces: a ladder shows from both sides.
+    return oriented([{ from: [0.8, 0, 0], to: [0.8, 16, 16], tex: 'ladder' }], props, false)
+  }
+
   switch (base) {
     case 'snow': {
-      const layers = Number(props['layers'] ?? '1')
-      return flat(2 * (Number.isFinite(layers) ? Math.min(8, Math.max(1, layers)) : 1))
+      const raw = Number(props['layers'] ?? '1')
+      const layers = Number.isFinite(raw) ? Math.min(8, Math.max(1, raw)) : 1
+      // Eight layers fill the cube: a full cube, so neighbours may cull against it.
+      return layers === 8 ? null : flat(2 * layers)
     }
     case 'farmland':
     case 'dirt_path':
@@ -245,8 +336,12 @@ export function shapeFor(base: string, props: Props): Shape | null {
         const [f, t] = LICHEN_BOX[face]
         boxes.push({ from: f, to: t, tex: base })
       }
-      return boxes.length > 0 ? { boxes } : null
+      // No attachment: present but invisible. An empty shape (not null) keeps
+      // it out of the greedy cube path and out of isOpaque.
+      return { boxes }
     }
+    case 'barrier':
+      return { boxes: [] }
     default:
       return null
   }

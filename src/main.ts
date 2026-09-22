@@ -21,7 +21,8 @@ overlay.innerHTML = `
     <input id="file" type="file" accept=".litematic" />
     <input id="pack" type="file" accept=".jar,.zip" />
     ...or drop a .litematic, or a Minecraft .jar / resource pack .zip, anywhere.
-    Packs stay in your browser; none of their assets are uploaded or shipped.
+    The bundled default pack is Mojang's vanilla 1.21.10 block textures; a pack
+    you supply is processed in your browser and never uploaded.
   </div>`
 document.body.appendChild(overlay)
 
@@ -86,7 +87,7 @@ async function loadPack(pack: Blob, name: string): Promise<void> {
   }
 }
 
-/** The bundled CC0 pack: textured on first paint, no Minecraft install needed. */
+/** The bundled vanilla pack: textured on first paint, no Minecraft install needed. */
 async function loadDefaultPack(): Promise<void> {
   const url = `${import.meta.env.BASE_URL}default-pack.zip`
   try {

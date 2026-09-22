@@ -1,6 +1,8 @@
-// Block textures loaded from a Minecraft client .jar or a resource-pack .zip
-// the *user* supplies. No Mojang asset is shipped or served by this app.
-// Without a pack we fall back to the flat colours in blocks.ts.
+// Block textures loaded from a resource pack: either the bundled default pack
+// (Mojang's vanilla 1.21.10 block textures, in public/default-pack.zip) or a
+// Minecraft client .jar / resource-pack .zip the user supplies. User-supplied
+// packs are parsed in the browser and never uploaded anywhere.
+// Without any pack we fall back to the flat colours in blocks.ts.
 
 import * as THREE from 'three'
 import { unzip, type UnzipFileInfo } from 'fflate'
@@ -87,8 +89,16 @@ const SPECIAL: Record<string, Partial<Record<Slot, Ref>>> = {
   dirt_path: { bottom: { name: 'dirt', tint: UNTINTED } },
   farmland: { side: { name: 'dirt', tint: UNTINTED }, bottom: { name: 'dirt', tint: UNTINTED } },
   crafting_table: { bottom: { name: 'oak_planks', tint: UNTINTED } },
-  smooth_sandstone: { side: { name: 'sandstone_top', tint: UNTINTED } },
-  smooth_red_sandstone: { side: { name: 'red_sandstone_top', tint: UNTINTED } },
+  // The smooth_* variants have no texture of their own: every face is the
+  // parent block's top (or, for quartz, bottom) texture.
+  smooth_sandstone: allSlots('sandstone_top'),
+  smooth_red_sandstone: allSlots('red_sandstone_top'),
+  smooth_quartz: allSlots('quartz_block_bottom'),
+}
+
+function allSlots(name: string): Record<Slot, Ref> {
+  const ref: Ref = { name, tint: UNTINTED }
+  return { top: ref, side: ref, bottom: ref }
 }
 
 /** Leaves that are already coloured in the pack and must not be tinted. */
@@ -122,6 +132,7 @@ const MATERIAL_SUFFIX = [
   '_fence',
   '_button',
   '_pressure_plate',
+  '_carpet',
 ]
 
 /** Texture stems for a block, most specific first, before any per-face suffix. */
@@ -132,11 +143,15 @@ function stemsOf(base: string): string[] {
   if (base === 'water') return ['water_still']
   if (base === 'lava') return ['lava_still']
   if (base === 'grass') return ['short_grass']
+  // *_block names whose texture simply drops the suffix.
+  if (base === 'snow_block') return ['snow']
+  if (base === 'magma_block') return ['magma']
   for (const suffix of MATERIAL_SUFFIX) {
     if (!base.endsWith(suffix)) continue
     // stone_brick_slab -> stone_bricks, spruce_slab -> spruce_planks.
     const stem = base.slice(0, -suffix.length)
-    return [base, stem, `${stem}s`, `${stem}_planks`]
+    // ..._wool: every carpet but moss_carpet is named after its wool.
+    return [base, stem, `${stem}s`, `${stem}_planks`, `${stem}_block`, `${stem}_wool`]
   }
   return [base]
 }
@@ -162,20 +177,31 @@ function tintOfTexture(name: string): number {
  * ponytail: no block model parsing; add it if stairs/doors/facing look wrong.
  */
 function resolveFace(base: string, slot: Slot, has: (name: string) => boolean): Ref | null {
-  const special = SPECIAL[base]?.[slot]
-  if (special) return has(special.name) ? special : null
-
   const tint = tintOf(base)
-  const candidates = stemsOf(base).flatMap((stem) =>
-    slot === 'top'
-      ? [`${stem}_top`, stem]
-      : slot === 'bottom'
-        ? [`${stem}_bottom`, `${stem}_top`, stem]
-        : [`${stem}_side`, stem],
-  )
+  // Per stem, not just the raw name: smooth_sandstone_slab has to reach
+  // SPECIAL['smooth_sandstone'] the same way it reaches sandstone's textures.
+  for (const stem of stemsOf(base)) {
+    const special = SPECIAL[stem]?.[slot]
+    if (special) {
+      // A composite (grass_block_side + its overlay) is indexed under the
+      // joined key; a pack with only the base texture still gets that base.
+      if (has(layerKeyOf(special))) return special
+      if (special.overlay && has(special.name)) return { name: special.name, tint: special.tint }
+      // A special says the generic guess is wrong for this block; don't use it.
+      return null
+    }
+    const candidates =
+      slot === 'top'
+        ? [`${stem}_top`, stem]
+        : slot === 'bottom'
+          ? [`${stem}_bottom`, `${stem}_top`, stem]
+          : [`${stem}_side`, stem]
+    for (const name of candidates) if (has(name)) return { name, tint }
+  }
   // Old packs named a few things differently; `grass` is the common one.
-  if (base === 'grass' || base === 'short_grass') candidates.push('grass', 'short_grass')
-  for (const name of candidates) if (has(name)) return { name, tint }
+  if (base === 'grass' || base === 'short_grass') {
+    for (const name of ['grass', 'short_grass']) if (has(name)) return { name, tint }
+  }
   return null
 }
 
@@ -280,9 +306,14 @@ function readBlockTextures(bytes: Uint8Array): Promise<Map<string, Uint8Array>> 
   let overflow = false
   const filter = (file: UnzipFileInfo): boolean => {
     if (!textureName(file.name)) return false
-    // `size` is the uncompressed size from the zip's own header.
-    if (file.size > MAX_PNG_BYTES) return false
-    budget -= file.size
+    // fflate's `size` is the *compressed* size; `originalSize` is what it will
+    // allocate for this entry. Deflate reaches ~1000:1 on repetitive data, so
+    // the caps have to be charged against originalSize or a zip bomb walks in.
+    if (file.originalSize > MAX_PNG_BYTES || file.size > MAX_PNG_BYTES) {
+      overflow = true
+      return false
+    }
+    budget -= file.originalSize
     if (budget < 0) {
       overflow = true
       return false
@@ -443,7 +474,11 @@ async function buildAtlas(
     try {
       tile = toTile(await decodePng(pngs.get(name)!), tileSize)
     } catch {
-      continue // A corrupt PNG costs one texture, not the whole pack.
+      // A corrupt PNG costs one texture, not the whole pack -- but its layer
+      // must be opaque white so the block's flat tint carries it. Left at zero
+      // it would be alpha 0, cut out by alphaTest, and the block a hole.
+      rgba.fill(0xff, (i + 1) * tileBytes, (i + 2) * tileBytes)
+      continue
     }
     rgba.set(tile, (i + 1) * tileBytes)
     if (composites.some((c) => c.base === name || c.overlay === name)) tiles.set(name, tile)
@@ -454,10 +489,12 @@ async function buildAtlas(
   }
 
   composites.forEach((c, i) => {
+    const at = (names.length + 1 + i) * tileBytes
     const base = tiles.get(c.base)
     const overlay = tiles.get(c.overlay)
-    if (!base || !overlay) return
-    rgba.set(composite(base, overlay, c.tint), (names.length + 1 + i) * tileBytes)
+    // Same reason as above: white, never transparent, when either half failed.
+    if (!base || !overlay) rgba.fill(0xff, at, at + tileBytes)
+    else rgba.set(composite(base, overlay, c.tint), at)
   })
 
   return { tileSize, rgba, layerKeys }
@@ -467,6 +504,8 @@ async function buildAtlas(
 
 const DB_NAME = 'litematica-textures'
 const STORE = 'atlas'
+/** Bump whenever buildAtlas() changes what a stored atlas means. */
+const LAYOUT_VERSION = 2
 
 function openDb(): Promise<IDBDatabase | null> {
   return new Promise((resolve) => {
@@ -488,12 +527,20 @@ async function cacheGet(key: string): Promise<Atlas | null> {
   return new Promise((resolve) => {
     try {
       const request = db.transaction(STORE, 'readonly').objectStore(STORE).get(key)
-      request.onsuccess = () => resolve((request.result as Atlas | undefined) ?? null)
+      request.onsuccess = () => resolve(validAtlas(request.result))
       request.onerror = () => resolve(null)
     } catch {
       resolve(null)
     }
   })
+}
+
+/** A stored atlas is untrusted input too: its shape must still add up. */
+function validAtlas(value: unknown): Atlas | null {
+  const atlas = value as Atlas | undefined
+  if (!atlas?.rgba || !Array.isArray(atlas.layerKeys) || !(atlas.tileSize > 0)) return null
+  const expected = atlas.layerKeys.length * atlas.tileSize * atlas.tileSize * 4
+  return atlas.rgba.length === expected ? atlas : null
 }
 
 async function cachePut(key: string, atlas: Atlas): Promise<void> {
@@ -528,7 +575,9 @@ export async function loadResourcePack(
     throw new Error('Not a .jar or .zip archive (missing PK header).')
   }
 
-  const key = await hash(bytes).catch(() => '')
+  const key = await hash(bytes)
+    .then((digest) => `v${LAYOUT_VERSION}:${digest}`)
+    .catch(() => '')
   if (key) {
     const cached = await cacheGet(key)
     if (cached) {
