@@ -1,3 +1,4 @@
+import { gzipSync } from 'node:zlib'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
@@ -120,5 +121,117 @@ describe('Hill.litematic round-trip', () => {
 
   it('rejects non-gzip input with a readable error', async () => {
     await expect(loadLitematic(new Uint8Array([1, 2, 3, 4]))).rejects.toThrow(/gzip/)
+  })
+
+  it('rejects a gzip file whose deflate stream is truncated mid-stream', async () => {
+    // A valid 1f8b header followed by a cut-off deflate stream: exercises the
+    // DecompressionStream/Response(stream).arrayBuffer() failure path, not
+    // just the "no gzip header at all" check above.
+    const truncated = hillBytes.subarray(0, 5000)
+    await expect(loadLitematic(truncated)).rejects.toThrow()
+  })
+
+  it('rejects valid gzip of non-NBT bytes with the parser\'s own error', async () => {
+    const gz = gzipSync(Buffer.from('not nbt data, just plain text'))
+    await expect(loadLitematic(gz)).rejects.toThrow(/Not NBT data|expected 10/)
+  })
+
+  it('rejects valid gzip of NBT with no Regions compound', async () => {
+    // Root compound with no children at all -> no "Regions" key.
+    const bytes = new Uint8Array([
+      10, 0, 0, // TAG_Compound, name len 0
+      0, // TAG_End
+    ])
+    const gz = gzipSync(Buffer.from(bytes))
+    await expect(loadLitematic(gz)).rejects.toThrow(/Regions/)
+  })
+})
+
+describe('Hill.litematic geometry and orientation', () => {
+  it('normalises the negative-Y Size region to a min corner at the origin', async () => {
+    // Hill's region has Position {0,129,0} and Size {148,-130,201}: a real
+    // file exercising the negative-Size normalisation path from parseRegion.
+    const schematic = await loadLitematic(hillBytes)
+    expect(schematic.regions.length).toBe(1)
+    const region = schematic.regions[0]!
+    expect(region.min).toEqual({ x: 0, y: 0, z: 0 })
+    expect(region.size).toEqual({ x: 148, y: 130, z: 201 })
+  })
+
+  it('orients layer y=0 as mostly-ground and layer y=129 as mostly-sky', async () => {
+    // A decoder that transposed x/z, or put local y=0 at the top of the
+    // build instead of the minimum corner, would flip this skew.
+    const schematic = await loadLitematic(hillBytes)
+    const region = schematic.regions[0]!
+    const air = region.palette.map((b) => isAir(b.name))
+
+    let y0Air = 0
+    let y0NonAir = 0
+    let yTopAir = 0
+    let yTopNonAir = 0
+    for (let z = 0; z < region.size.z; z++) {
+      for (let x = 0; x < region.size.x; x++) {
+        if (air[region.getBlock(x, 0, z)]) y0Air++
+        else y0NonAir++
+        if (air[region.getBlock(x, region.size.y - 1, z)]) yTopAir++
+        else yTopNonAir++
+      }
+    }
+
+    // Ground truth measured independently against the fixture:
+    // y=0 is 21631 stone + 3425 air; y=129 is 27025 air + 225 snow_block.
+    expect(y0NonAir).toBeGreaterThan(y0Air)
+    expect(yTopAir).toBeGreaterThan(yTopNonAir)
+  })
+
+  it('gets exact palette names at fixed coordinates', async () => {
+    // Expected names obtained by running loadLitematic(Hill.litematic) once
+    // and reading region.getBlock/palette at these coordinates directly (see
+    // the aggregate counts above, which match the ground truth exactly:
+    // 21631 stone/3425 air at y=0 and 27025 air/225 snow_block at y=129).
+    const schematic = await loadLitematic(hillBytes)
+    const region = schematic.regions[0]!
+    const nameAt = (x: number, y: number, z: number) => region.palette[region.getBlock(x, y, z)]!.name
+
+    expect(nameAt(0, 0, 0)).toBe('minecraft:stone')
+    expect(nameAt(147, 0, 0)).toBe('minecraft:andesite')
+    expect(nameAt(0, 0, 200)).toBe('minecraft:air')
+    expect(nameAt(147, 0, 200)).toBe('minecraft:stone')
+    expect(nameAt(74, 0, 100)).toBe('minecraft:stone')
+    expect(nameAt(74, 129, 100)).toBe('minecraft:air')
+    expect(nameAt(0, 129, 0)).toBe('minecraft:air')
+  })
+})
+
+describe('parseNbt TAG_Byte_Array (type 7)', () => {
+  it('parses a byte array from a view with a non-zero byteOffset', () => {
+    // Hand-built NBT: an unnamed root compound containing one TAG_Byte_Array
+    // named "Bytes" with values [1, -2, 3, 127, -128].
+    //
+    // Layout: TAG_Compound(10), name len 0,
+    //   TAG_Byte_Array(7), name len 5 "Bytes", array len 5, 5 payload bytes,
+    //   TAG_End(0).
+    const payload = [
+      10, 0, 0,
+      7, 0, 5, 66, 121, 116, 101, 115, // "Bytes"
+      0, 0, 0, 5,
+      1, 0xfe, 3, 127, 0x80,
+      0,
+    ]
+
+    // Embed in a larger, differently-aligned backing buffer so the array is
+    // a view with a non-zero byteOffset: this is the case most likely to
+    // break manual byteOffset arithmetic into the underlying ArrayBuffer
+    // (e.g. a pooled Node Buffer).
+    const padding = 17
+    const backing = new Uint8Array(padding + payload.length + 13)
+    backing.set(payload, padding)
+    const view = backing.subarray(padding, padding + payload.length)
+    expect(view.byteOffset).toBe(padding)
+
+    const { value } = parseNbt(view)
+    const bytes = value['Bytes']
+    expect(bytes).toBeInstanceOf(Int8Array)
+    expect(Array.from(bytes as Int8Array)).toEqual([1, -2, 3, 127, -128])
   })
 })
