@@ -24,11 +24,21 @@ document.body.appendChild(overlay)
 
 const el = (id: string) => document.getElementById(id)!
 const status = el('status')
-const viewer = new Viewer(app)
 
 function setStatus(text: string, isError = false): void {
   status.textContent = text
   status.classList.toggle('error', isError)
+}
+
+let viewer: Viewer
+try {
+  viewer = new Viewer(app)
+} catch (error) {
+  setStatus(
+    `Could not start the 3D viewer (WebGL unavailable): ${error instanceof Error ? error.message : String(error)}`,
+    true,
+  )
+  throw error
 }
 
 function describe(schematic: Schematic, instances: number): void {
@@ -61,13 +71,21 @@ el('file').addEventListener('change', (event) => {
   if (file) loadFile(file)
 })
 
-app.addEventListener('dragover', (event) => {
-  event.preventDefault()
+// Bound to the window: #overlay is painted on top of #app, and the drop hint
+// lives inside it, so an #app-only handler lets the browser navigate the tab.
+let dragDepth = 0
+addEventListener('dragenter', () => {
+  dragDepth++
   app.classList.add('dragging')
 })
-app.addEventListener('dragleave', () => app.classList.remove('dragging'))
-app.addEventListener('drop', (event) => {
+addEventListener('dragover', (event) => event.preventDefault())
+addEventListener('dragleave', () => {
+  dragDepth = Math.max(0, dragDepth - 1)
+  if (dragDepth === 0) app.classList.remove('dragging')
+})
+addEventListener('drop', (event) => {
   event.preventDefault()
+  dragDepth = 0
   app.classList.remove('dragging')
   const file = event.dataTransfer?.files[0]
   if (file) loadFile(file)

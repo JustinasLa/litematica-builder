@@ -75,14 +75,36 @@ export function normaliseRegion(pos: Vec3, size: Vec3): { min: Vec3; size: Vec3 
   }
 }
 
+/** Decompression cap: a crafted gzip bomb must not OOM the tab. */
+const MAX_DECOMPRESSED = 512 * 1024 * 1024
+
 export async function gunzip(data: ArrayBuffer | Uint8Array): Promise<Uint8Array> {
-  // Copy/wrap into an ArrayBuffer-backed view so it is a valid BlobPart.
-  const bytes = data instanceof Uint8Array ? new Uint8Array(data) : new Uint8Array(data)
+  // Copy into an ArrayBuffer-backed view so it is a valid BlobPart.
+  const bytes = new Uint8Array(data)
   if (bytes.length < 2 || bytes[0] !== 0x1f || bytes[1] !== 0x8b) {
     throw new Error('Not a .litematic file: missing gzip header (expected 1f 8b).')
   }
   const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))
-  return new Uint8Array(await new Response(stream).arrayBuffer())
+  const reader = stream.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.byteLength
+    if (total > MAX_DECOMPRESSED) {
+      await reader.cancel()
+      throw new Error(`Schematic too large (over ${MAX_DECOMPRESSED / (1024 * 1024)} MB decompressed)`)
+    }
+    chunks.push(value)
+  }
+  const out = new Uint8Array(total)
+  let at = 0
+  for (const chunk of chunks) {
+    out.set(chunk, at)
+    at += chunk.byteLength
+  }
+  return out
 }
 
 /** Gunzip + parse + normalise a .litematic file. */
@@ -149,7 +171,7 @@ function parseRegion(name: string, region: NbtCompound): Region {
   const bits = bitsPerEntryFor(palette.length)
   const entryCount = size.x * size.y * size.z
   const expected = Math.ceil((entryCount * bits) / 64)
-  if (states.length !== expected) {
+  if (states.length < expected) {
     throw new Error(
       `Region "${name}": BlockStates length ${states.length} does not match ` +
         `${entryCount} blocks at ${bits} bits/entry (expected ${expected} longs).`,

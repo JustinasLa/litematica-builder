@@ -12,12 +12,11 @@ const NEIGHBOURS = [
   [0, 0, -1],
 ] as const
 
-/** Blocks that are visible: not air, and not completely enclosed by opaque blocks. */
-function visibleBlocks(schematic: Schematic): { positions: Float32Array; colours: Float32Array } {
-  const positions: number[] = []
-  const colours: number[] = []
-  const colour = new THREE.Color()
-
+/** Visit every visible block: not air, and not completely enclosed by opaque blocks. */
+function eachVisibleBlock(
+  schematic: Schematic,
+  visit: (x: number, y: number, z: number, paletteIndex: number, rgb: number[]) => void,
+): void {
   for (const region of schematic.regions) {
     const { size, min, palette, blocks } = region
     const air = palette.map((b) => isAir(b.name))
@@ -48,14 +47,35 @@ function visibleBlocks(schematic: Schematic): { positions: Float32Array; colours
           }
           if (hidden) continue
 
-          positions.push(min.x + x + 0.5, min.y + y + 0.5, min.z + z + 0.5)
-          colour.setHex(rgb[index]!, THREE.SRGBColorSpace)
-          colours.push(colour.r, colour.g, colour.b)
+          visit(min.x + x + 0.5, min.y + y + 0.5, min.z + z + 0.5, index, rgb)
         }
       }
     }
   }
-  return { positions: new Float32Array(positions), colours: new Float32Array(colours) }
+}
+
+/** Instance data for the visible blocks. Counts first, so the arrays are exact-sized. */
+function visibleBlocks(schematic: Schematic): { positions: Float32Array; colours: Float32Array } {
+  let count = 0
+  eachVisibleBlock(schematic, () => {
+    count++
+  })
+
+  const positions = new Float32Array(count * 3)
+  const colours = new Float32Array(count * 3)
+  const colour = new THREE.Color()
+  let i = 0
+  eachVisibleBlock(schematic, (x, y, z, index, rgb) => {
+    positions[i] = x
+    positions[i + 1] = y
+    positions[i + 2] = z
+    colour.setHex(rgb[index]!, THREE.SRGBColorSpace)
+    colours[i] = colour.r
+    colours[i + 1] = colour.g
+    colours[i + 2] = colour.b
+    i += 3
+  })
+  return { positions, colours }
 }
 
 export class Viewer {

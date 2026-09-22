@@ -120,13 +120,13 @@ class Reader {
         }
       }
       case 11: {
-        const len = this.checkedLength()
+        const len = this.checkedLength(4)
         const out = new Int32Array(len)
         for (let i = 0; i < len; i++) out[i] = this.i32()
         return out
       }
       case 12: {
-        const len = this.checkedLength()
+        const len = this.checkedLength(8)
         const out = new BigInt64Array(len)
         for (let i = 0; i < len; i++) out[i] = this.i64()
         return out
@@ -136,9 +136,13 @@ class Reader {
     }
   }
 
-  private checkedLength(): number {
+  /** Length prefix, validated against the remaining bytes (size = bytes per element). */
+  private checkedLength(size = 1): number {
     const len = this.i32()
     if (len < 0) throw new Error(`Negative NBT array/list length ${len}`)
+    if (this.pos + len * size > this.bytes.byteLength) {
+      throw new Error(`Truncated NBT data: wanted ${len * size} byte(s) at offset ${this.pos}`)
+    }
     return len
   }
 }
