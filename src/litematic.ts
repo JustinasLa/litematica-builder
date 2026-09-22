@@ -78,6 +78,9 @@ export function normaliseRegion(pos: Vec3, size: Vec3): { min: Vec3; size: Vec3 
 /** Decompression cap: a crafted gzip bomb must not OOM the tab. */
 const MAX_DECOMPRESSED = 512 * 1024 * 1024
 
+/** Per-region block cap: 64M entries is a 256 MB Uint32Array, ~16x the Hill fixture. */
+const MAX_REGION_BLOCKS = 64 * 1024 * 1024
+
 export async function gunzip(data: ArrayBuffer | Uint8Array): Promise<Uint8Array> {
   // Copy into an ArrayBuffer-backed view so it is a valid BlobPart.
   const bytes = new Uint8Array(data)
@@ -146,6 +149,7 @@ function parseRegion(name: string, region: NbtCompound): Region {
     throw new Error(`Region "${name}" is missing Position or Size.`)
   }
   const { min, size } = normaliseRegion(pos, rawSize)
+  const entryCount = checkedEntryCount(name, size)
 
   const paletteTag = region['BlockStatePalette']
   if (!Array.isArray(paletteTag) || paletteTag.length === 0) {
@@ -169,7 +173,6 @@ function parseRegion(name: string, region: NbtCompound): Region {
   }
 
   const bits = bitsPerEntryFor(palette.length)
-  const entryCount = size.x * size.y * size.z
   const expected = Math.ceil((entryCount * bits) / 64)
   if (states.length < expected) {
     throw new Error(
@@ -200,6 +203,27 @@ function parseRegion(name: string, region: NbtCompound): Region {
     blocks,
     getBlock: (x, y, z) => blocks[y * strideY + z * strideZ + x]!,
   }
+}
+
+/**
+ * Block count of a region, validated before anything is allocated from it: a
+ * crafted Size is a trust boundary just like the decompressed byte count.
+ */
+function checkedEntryCount(name: string, size: Vec3): number {
+  for (const axis of ['x', 'y', 'z'] as const) {
+    const n = size[axis]
+    if (!Number.isSafeInteger(n) || n <= 0) {
+      throw new Error(`Region "${name}" has a non-positive or invalid ${axis} size (${n}).`)
+    }
+  }
+  const count = size.x * size.y * size.z
+  if (!Number.isSafeInteger(count) || count > MAX_REGION_BLOCKS) {
+    throw new Error(
+      `Region "${name}" is too large (${size.x}x${size.y}x${size.z} = ${count} blocks, ` +
+        `limit ${MAX_REGION_BLOCKS.toLocaleString('en-US')}).`,
+    )
+  }
+  return count
 }
 
 function enclosingSizeOf(regions: Region[]): Vec3 {
