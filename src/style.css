@@ -74,7 +74,7 @@ canvas {
 }
 
 #app.dragging::after {
-  content: 'Drop a .litematic file';
+  content: 'Drop a .litematic, .jar or .zip';
   position: fixed;
   inset: 0;
   display: grid;

@@ -1,6 +1,8 @@
 // Block name -> approximate RGB. No Mojang assets; these are hand-picked
 // averages. Unknown blocks fall back to a stable hash-derived colour.
 
+import { shapeFor } from './shapes'
+
 const COLOURS: Record<string, number> = {
   // stone family
   stone: 0x7d7d7d,
@@ -196,18 +198,13 @@ const NON_OPAQUE_EXACT = new Set([
   'cobweb',
 ])
 
+// Shaped blocks (slabs, stairs, fences, ...) are not listed here: shapes.ts is
+// the single authority on those, so the two lists cannot drift apart.
 const NON_OPAQUE_SUFFIX = [
   '_leaves',
   '_glass',
   '_glass_pane',
-  '_slab',
-  '_stairs',
-  '_fence',
-  '_fence_gate',
-  '_wall',
   '_door',
-  '_trapdoor',
-  '_carpet',
   '_bars',
   '_pane',
   '_sign',
@@ -230,10 +227,14 @@ export function isAir(name: string): boolean {
   return AIR.has(baseName(name))
 }
 
-/** Does this block hide the faces of its neighbours? */
-export function isOpaque(name: string): boolean {
+/**
+ * Does this block hide the faces of its neighbours? Anything with a shape in
+ * shapes.ts does not: it no longer fills its cube.
+ */
+export function isOpaque(name: string, properties: Record<string, string> = {}): boolean {
   const base = baseName(name)
   if (AIR.has(base) || NON_OPAQUE_EXACT.has(base)) return false
+  if (shapeFor(base, properties) !== null) return false
   return !NON_OPAQUE_SUFFIX.some((suffix) => base.endsWith(suffix))
 }
 
